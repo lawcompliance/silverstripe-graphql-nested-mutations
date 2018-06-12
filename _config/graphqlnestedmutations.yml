@@ -1,0 +1,6 @@
+---
+Name: graphqlnestedmutations
+---
+SilverStripe\GraphQL\Scaffolding\Scaffolders\MutationScaffolder:
+  extensions:
+    - Internetrix\GraphQLNestedMutations\NestedCreateOrUpdateScaffolderExtension
