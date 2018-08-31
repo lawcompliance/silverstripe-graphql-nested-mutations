@@ -1,20 +1,24 @@
 <?php
 
-namespace Internetrix\GraphQLNestedMutations;
+namespace Internetrix\GraphQLNestedMutations\Extensions;
 
+use Exception;
 use GraphQL\Type\Definition\InputObjectType;
 use GraphQL\Type\Definition\Type;
+use function is_array;
 use SilverStripe\Core\Config\Config;
 use SilverStripe\Core\Extension;
 use SilverStripe\Core\Injector\Injector;
+use SilverStripe\Dev\Debug;
 use SilverStripe\GraphQL\Manager;
 use SilverStripe\GraphQL\Scaffolding\Scaffolders\MutationScaffolder;
-use SilverStripe\GraphQL\Scaffolding\Util\ScaffoldingUtil;
+use SilverStripe\GraphQL\Scaffolding\StaticSchema;
 use SilverStripe\ORM\DataObjectSchema;
 use SilverStripe\ORM\FieldType\DBField;
 use SilverStripe\GraphQL\Scaffolding\Interfaces\ResolverInterface;
 use SilverStripe\ORM\DataList;
 use SilverStripe\ORM\DataObject;
+use SilverStripe\ORM\ManyManyThroughList;
 
 class NestedCreateOrUpdateScaffolderExtension extends Extension
 {
@@ -27,10 +31,13 @@ class NestedCreateOrUpdateScaffolderExtension extends Extension
         if(isset($schema['scaffolding']['allowNestedMutations'])){
             $allowedTypes = $schema['scaffolding']['allowNestedMutations'];
         }
-
-        $class = $scaffolder->getDataObjectClass();
-        if(in_array($class, $allowedTypes)){
-            $inputTypeName = $scaffolder->typeName().$scaffolderClass.'InputType';     //$scaffolder->inputTypeName() is protected
+//        $nestedInputTypeBlacklist = [];
+//        if(isset($schema['scaffolding']['nestedInputTypeBlacklist'])){
+//            $nestedInputTypeBlacklist = $schema['scaffolding']['nestedInputTypeBlacklist'];
+//        }
+        $doClass = $scaffolder->getDataObjectClass();
+        if(in_array($doClass, $allowedTypes)){
+            $inputTypeName = $scaffolder->getTypeName().$scaffolderClass.'InputType';     //$scaffolder->inputTypeName() is protected
 
             //SilverStripe\GraphQL\Scaffolding\Scaffolders\CRUD\Update.php adds this type before calling
             //this extension hook
@@ -38,13 +45,25 @@ class NestedCreateOrUpdateScaffolderExtension extends Extension
                 $inputType = $manager->getType($inputTypeName);
 
                 //the following closure is mostly copied from SilverStripe\GraphQL\Scaffolding\Scaffolders\CRUD\Update->generateInputType()
-                $inputType->config['fields'] = function () use ($manager, $scaffolder, $class, $scaffolderClass) {
-                    $fields = [];
+                $inputType->config['fields'] = function () use ($manager, $scaffolder, $doClass, $scaffolderClass) {
+                    if($scaffolderClass == 'Update'){
+                        $fields = [
+                            'ID' => [
+                                'type' => Type::nonNull(Type::id()),
+                            ],
+                        ];
+                    }else{
+                        $fields = [];
+                    }
+
+                    /** @var DataObject $instance */
                     $instance = $scaffolder->getDataObjectInstance();
+                    $doTypeName = StaticSchema::inst()->typeNameForDataObject($doClass);
 
                     // Setup default input args.. Placeholder!
                     $schema = Injector::inst()->get(DataObjectSchema::class);
-                    $db = $schema->fieldSpecs($class);
+                    $db = $schema->fieldSpecs($doClass);
+
 
                     unset($db['ID']);
 
@@ -64,8 +83,8 @@ class NestedCreateOrUpdateScaffolderExtension extends Extension
                     // TODO: maybe make it possible to set a whitelist or a blacklist of relations per object
                     $hasOnes = $instance->hasOne();
 
-                    foreach($hasOnes as $relationship => $rclass){
-                        $typeName = ScaffoldingUtil::typeNameForDataObject($rclass).'UpdateInputType';
+                    foreach($hasOnes as $relationship => $class){
+                        $typeName = StaticSchema::inst()->typeNameForDataObject($class).'UpdateInputType';
 
                         if($manager->hasType($typeName)){
                             $fields[$relationship] = [
@@ -78,9 +97,52 @@ class NestedCreateOrUpdateScaffolderExtension extends Extension
                     $hasManys = $instance->hasMany();
 
                     foreach($hasManys as $relationship => $class){
-                        $typeName = $relationship.'Nested'.$scaffolderClass.'InputType';
-                        if(!$manager->hasType($typeName)){
-                            $fields[$relationship] = $this->buildNewType($typeName, $class,$manager);
+                        $typeName = StaticSchema::inst()->typeNameForDataObject($class).'UpdateInputType';
+//                        Debug::show($typeName);
+                        if($manager->hasType($typeName)) {
+                            $typeName = $doTypeName . $relationship . 'Nested' . $scaffolderClass . 'InputType';
+                            if (!$manager->hasType($typeName)) {
+                                $fields[$relationship] = $this->buildNewType($typeName, $class, $manager);
+                            }
+                        }
+                    }
+
+                    // TODO: maybe make it possible to set a whitelist or a blacklist of relations per object
+                    $manyManys = $instance->ManyMany();
+
+                    foreach($manyManys as $relationship => $class){
+                        if (is_array($class) && isset($class['through'])){
+                            $typeName = StaticSchema::inst()->typeNameForDataObject($class['through']).'UpdateInputType';
+                        }elseif(!is_array($class)){
+                            $typeName = StaticSchema::inst()->typeNameForDataObject($class).'UpdateInputType';
+                        }else{
+                            throw new Exception('Class is an array but the "to" class is not defined');
+                        }
+
+                        if($manager->hasType($typeName)) {
+                            $typeName = $doTypeName . $relationship . 'Nested' . $scaffolderClass . 'InputType';
+                            if (!$manager->hasType($typeName)) {
+                                $manyManyList = $instance->getManyManyComponents($relationship, -1);
+                                if ($manyManyList instanceof ManyManyThroughList) {
+                                    if (is_array($class) && isset($class['through']) && isset($class['to'])) {
+                                        $through = $class['through'];
+                                        $throughHasOnes = $through::config()->get('has_one');
+                                        if (isset($throughHasOnes[$class['to']])) {
+                                            $class = $throughHasOnes[$class['to']];
+                                            $extraFields = Injector::inst()->get($through)->config()->db;
+                                        } else {
+                                            throw new Exception('Cannot find the through objects has_one');
+                                        }
+                                    } else {
+                                        throw new Exception('A "to" class must be defined');
+                                    }
+                                } else {
+                                    $extraFields = $manyManyList->getExtraFields();
+                                }
+
+                                $fields[$relationship] = $this->buildNewManyManyType($typeName, $class, $manager,
+                                    $extraFields);
+                            }
                         }
                     }
 
@@ -124,15 +186,48 @@ class NestedCreateOrUpdateScaffolderExtension extends Extension
         ];
     }
 
+    /*
+     * This input type is used to
+     * do not unset the ID
+     */
+    private function buildNewManyManyType($newTypeName, $instanceClassName, $manager, $extraFields){
+        return [
+            'type' => Type::listOf( (new InputObjectType([
+                'name' => $newTypeName,
+                'fields' => function () use ($manager, $instanceClassName, $extraFields) {
+                    $fields = [];
+                    $instance =  Injector::inst()->get($instanceClassName);
+
+                    $extraFields = ['ID' => 'Int'] + $extraFields;
+
+                    foreach ($extraFields as $dbFieldName => $dbFieldType) {
+                        /** @var DBField $result */
+                        $result = $instance->obj($dbFieldName);
+                        // Skip complex fields, e.g. composite, as that would require scaffolding a new input type.
+                        if (!$result->isInternalGraphQLType()) {
+                            continue;
+                        }
+                        $arr = [
+                            'type' => $result->getGraphQLType($manager),
+                        ];
+                        $fields[$dbFieldName] = $arr;
+                    }
+                    return $fields;
+                }
+            ])))
+        ];
+    }
+
     public function augmentMutation($obj, $args, $context, $info){
-        $this->mutateHasOneRelations($obj, $args, $context);
+        $this->mutateHasOneRelations($obj, $args, $context, $info);
         $this->mutateHasManyRelations($obj, $args, $context);
+        $this->mutateManyManyRelations($obj, $args, $context);
 
         // TODO: need to have logic here
         return true;
     }
 
-    private function mutateHasOneRelations(DataObject $obj, $args, $context){
+    private function mutateHasOneRelations(DataObject $obj, $args, $context, $info){
 
         $hasOnes = $obj->hasOne();
         if($hasOnes){
@@ -163,12 +258,12 @@ class NestedCreateOrUpdateScaffolderExtension extends Extension
                             );
                         }
 
+                        $args['Input'][$relationship]['ID'] = $obj->{$relationship . 'ID'};
                         $relationArgs = [
-                            'ID' => $obj->{$relationship . 'ID'},
                             'Input' => $args['Input'][$relationship]
                         ];
 
-                        $relObj = $resolver->resolve(null, $relationArgs, $context, null);
+                        $relObj = $resolver->resolve(null, $relationArgs, $context, $info);
                         if($relObj && $relObj->exists()){
                             $obj->{$relationship . 'ID'} = $relObj->ID;
                         }
@@ -231,6 +326,23 @@ class NestedCreateOrUpdateScaffolderExtension extends Extension
                             $item = Injector::inst()->create($class, $tc);
                             $hasManyList->add($item);
                         }
+                    }
+                }
+            }
+        }
+    }
+
+    private function mutateManyManyRelations(DataObject $obj, $args, $context){
+        $manyManys = $obj->manyMany();
+        if($manyManys){
+            foreach($manyManys as $relationship => $class){
+                if(isset($args['Input'][$relationship])){
+                    $items = $args['Input'][$relationship];
+                    foreach($items as $extraFields){
+                        $itemID = $extraFields['ID'];
+                        unset($extraFields['ID']);
+                        //TODO we should validate the itemID to ensure it exists
+                        $obj->$relationship()->add($itemID, $extraFields);
                     }
                 }
             }
