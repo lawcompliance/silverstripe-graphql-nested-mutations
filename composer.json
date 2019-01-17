@@ -17,9 +17,9 @@
     }
   ],
   "require": {
-    "silverstripe/vendor-plugin": "^1.0",
+    "silverstripe/vendor-plugin": "^1.2",
     "silverstripe/framework": "^4.2",
-    "silverstripe/graphql": "^2"
+    "silverstripe/graphql": "^3.0"
   },
   "require-dev": {
     "phpunit/phpunit": "^5.7",

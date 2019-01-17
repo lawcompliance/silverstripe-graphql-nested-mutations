@@ -22,14 +22,15 @@ SilverStripe\GraphQL\Controller:
 Don't forget to allow update and/or create mutation operations on the scaffolders also. e.g.
 
 ```
-SilverStripe\GraphQL\Controller:
-  schema:
-    scaffolding:
-      types:
-        CustomDataObject:
-          operations:
-            create: true
-            update: true
+SilverStripe\GraphQL\Manager:
+  schemas:
+    default:    #default schema
+      scaffolding:
+        types:
+          CustomDataObject:
+            operations:
+              create: true
+              update: true
 ```
 
 #### Notes:
