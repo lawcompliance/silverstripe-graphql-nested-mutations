@@ -5,8 +5,6 @@ namespace Internetrix\GraphQLNestedMutations\Extensions;
 use Exception;
 use GraphQL\Type\Definition\InputObjectType;
 use GraphQL\Type\Definition\Type;
-use function is_array;
-
 use SilverStripe\Core\Config\Config;
 use SilverStripe\Core\Extension;
 use SilverStripe\Core\Injector\Injector;
@@ -24,7 +22,9 @@ use SilverStripe\ORM\FieldType\DBField;
 use SilverStripe\GraphQL\Scaffolding\Interfaces\ResolverInterface;
 use SilverStripe\ORM\DataList;
 use SilverStripe\ORM\DataObject;
+use SilverStripe\ORM\ManyManyList;
 use SilverStripe\ORM\ManyManyThroughList;
+use SilverStripe\Core\ClassInfo;
 
 class NestedCreateOrUpdateScaffolderExtension extends Extension
 {
@@ -117,6 +117,9 @@ class NestedCreateOrUpdateScaffolderExtension extends Extension
         // TODO: maybe make it possible to set a whitelist or a blacklist of relations per object
         $hasManys = $instance->hasMany();
         foreach($hasManys as $relationship => $class){
+            if($instance->getClassName() == $class){
+                continue; //we cannot nest has_many relations of the same class as this will create an infinite loop
+            }
             $classTypeName = StaticSchema::inst()->typeNameForDataObject($class);
             $typeName = $classTypeName. $scaffolderClass . 'InputType';
             if($manager->hasType($typeName)) {
@@ -139,6 +142,7 @@ class NestedCreateOrUpdateScaffolderExtension extends Extension
         foreach($manyManys as $relationship => $class){
             if (is_array($class) && isset($class['through'])){
                 $classTypeName = StaticSchema::inst()->typeNameForDataObject($class['through']);
+                $class = $class['through'];
             }elseif(!is_array($class)){
                 $classTypeName = StaticSchema::inst()->typeNameForDataObject($class);
             }else{
@@ -162,6 +166,30 @@ class NestedCreateOrUpdateScaffolderExtension extends Extension
                 ];
             }
         }
+    }
+
+    public function generateFields(Manager $manager, $class, $scaffolderClass){
+        $fields = [];
+        $instance =  Injector::inst()->get($class);
+        $schema = Injector::inst()->get(DataObjectSchema::class);
+        $db = $schema->fieldSpecs($class);
+
+        foreach ($db as $dbFieldName => $dbFieldType) {
+            /** @var DBField $result */
+            $result = $instance->obj($dbFieldName);
+            // Skip complex fields, e.g. composite, as that would require scaffolding a new input type.
+            if (!$result->isInternalGraphQLType()) {
+                continue;
+            }
+            $arr = [
+                'type' => $result->getGraphQLType($manager),
+            ];
+            $fields[$dbFieldName] = $arr;
+        }
+
+        $this->addRelationshipFields($fields, $instance, $manager, $scaffolderClass);
+
+        return $fields;
     }
 
     private function buildNewCreateOrUpdateType($newTypeName, $class, $manager, $scaffolderClass){
@@ -204,35 +232,35 @@ class NestedCreateOrUpdateScaffolderExtension extends Extension
      * do not unset the ID
      */
     private function buildNewManyType($newTypeName, $class, $manager, $scaffolderClass){
-        return Type::listOf( (new InputObjectType([
-            'name' => $newTypeName,
-            'fields' => function () use ($manager, $class, $scaffolderClass) {
-                $fields = [];
-                $instance =  Injector::inst()->get($class);
-//                    $doTypeName = StaticSchema::inst()->typeNameForDataObject($instanceClassName);
+        $schema = StaticSchema::inst();
+        $tree = array_merge(
+            [$class],
+            $schema->getDescendants($class)
+        );
+        if(count($tree) > 1){
+            $types = array_map(function ($class) use ($tree, $schema) {
+                return $schema->typeNameForDataObject($class);
+            }, $tree);
 
-                // Setup default input args.. Placeholder!
-                $schema = Injector::inst()->get(DataObjectSchema::class);
-                $db = $schema->fieldSpecs($class);
-
-                foreach ($db as $dbFieldName => $dbFieldType) {
-                    /** @var DBField $result */
-                    $result = $instance->obj($dbFieldName);
-                    // Skip complex fields, e.g. composite, as that would require scaffolding a new input type.
-                    if (!$result->isInternalGraphQLType()) {
-                        continue;
+            return (new InputObjectType([
+                'name' => $newTypeName,
+                'fields' => function () use ($manager, $types, $scaffolderClass) {
+                    $fields = [];
+                    foreach($types as $type){
+                        $fields[$type] = Type::listOf( (new InputObjectType([
+                            'name' => $type . 'ManyNested' . $scaffolderClass . 'InputType',
+                            'fields' => call_user_func(array($this, 'generateFields'), $manager, $type, $scaffolderClass)
+                        ])));
                     }
-                    $arr = [
-                        'type' => $result->getGraphQLType($manager),
-                    ];
-                    $fields[$dbFieldName] = $arr;
+                    return $fields;
                 }
-
-                $this->addRelationshipFields($fields, $instance, $manager, $scaffolderClass);
-
-                return $fields;
-            }
-        ])));
+            ]));
+        }else{
+            return Type::listOf( (new InputObjectType([
+                'name' => $newTypeName,
+                'fields' => call_user_func(array($this, 'generateFields'), $manager, $class, $scaffolderClass)
+            ])));
+        }
     }
 
     /*
@@ -241,17 +269,7 @@ class NestedCreateOrUpdateScaffolderExtension extends Extension
      */
     private function buildNewManyManyType($newTypeName, $class, $manager, $scaffolderClass, $manyManyList)
     {
-        $extraFields = [];
-        if ($manyManyList instanceof ManyManyThroughList) {
-            if (is_array($class) && isset($class['through'])) {
-                $class = $class['through'];
-                $extraFields = Injector::inst()->get($class)->config()->db;
-            } else {
-                throw new Exception('A "through" class must be defined');
-            }
-        } else {
-            $extraFields = $manyManyList->getExtraFields();
-        }
+        $extraFields = $manyManyList->getExtraFields();
 
         return Type::listOf((new InputObjectType([
             'name' => $newTypeName,
@@ -323,55 +341,73 @@ class NestedCreateOrUpdateScaffolderExtension extends Extension
     }
 
     private function mutateHasManyRelations(DataObject $obj, $args, $context, $info){
-
         $hasMany = $obj->hasMany();
         if($hasMany) {
-            foreach ($hasMany as $relationship => $class) {
+            $schema = StaticSchema::inst();
+            foreach ($hasMany as $relationship => $relationshipClass) {
+                $descendants = array_merge([$relationshipClass], $schema->getDescendants($relationshipClass));
+
                 if (isset($args['Input'][$relationship])) {
-                    $data = $args['Input'][$relationship];
 
-                    /* @var $hasManyList DataList */
-                    $hasManyList = $obj->$relationship();
+                    foreach($descendants as $class){
+                        $data = $args['Input'][$relationship];
 
-                    $toCreate = [];
-                    $update = [];
-                    $updateIDs = [];
-                    foreach($data as $d){
-                        if(isset($d['ID']) && $d['ID']){
-                            $update[$d['ID']] = $d;
-                            $updateIDs[] = $d['ID'];
-                        }else{
-                            $toCreate[] = $d;
+                        //this means the input will be split between the descendant types
+                        if(count($descendants) > 1){
+                            if(!isset($data[$class])){
+                                continue;
+                            }
+                            $data = $data[$class];
                         }
-                    }
 
-                    if($hasManyList && $hasManyList->count()){
-                        if(!empty($updateIDs)){
-                            /* @var $toUpdate DataList */
-                            $toUpdate = clone $hasManyList;
-                            $toUpdate = $toUpdate->filter('ID', $updateIDs);
-                            foreach($toUpdate as $tu){
-                                $this->updateRelatedObject($tu->ClassName, $update[$tu->ID], $context, $info);
+                        /* @var $hasManyList DataList */
+                        $hasManyList = $obj->$relationship();
+
+                        $toCreate = [];
+                        $update = [];
+                        $updateIDs = [];
+                        foreach($data as $d){
+                            if(isset($d['ID']) && $d['ID']){
+                                $update[$d['ID']] = $d;
+                                $updateIDs[] = $d['ID'];
+                            }else{
+                                $toCreate[] = $d;
                             }
                         }
 
-                        $toDelete = clone $hasManyList;
-                        if(!empty($updateIDs)){
-                            $toDelete = $toDelete->exclude('ID', $updateIDs);
+                        if($hasManyList && $hasManyList->count()){
+                            if(!empty($updateIDs)){
+                                /* @var $toUpdate DataList */
+                                $toUpdate = clone $hasManyList;
+                                $toUpdate = $toUpdate->filter('ID', $updateIDs);
+                                foreach($toUpdate as $tu){
+                                    $this->updateRelatedObject($tu->ClassName, $update[$tu->ID], $context, $info);
+                                }
+                            }
+
+                            $toDelete = clone $hasManyList;
+
+                            if(count($descendants) > 1){
+                                $toDelete = $toDelete->filter('ClassName', $class);
+                            }
+
+                            if(!empty($updateIDs)){
+                                $toDelete = $toDelete->exclude('ID', $updateIDs);
+                            }
+
+                            if($toDelete->count()){
+                                $first = $toDelete->first();
+                                $this->deleteRelatedObject($first->ClassName, $toDelete->column("ID"), $context, $info);
+                            }
+
                         }
 
-                        if($toDelete->count()){
-                            $first = $toDelete->first();
-                            $this->deleteRelatedObject($first->ClassName, $toDelete->column("ID"), $context, $info);
-                        }
-
-                    }
-
-                    if(!empty($toCreate)){
-                        foreach($toCreate as $tc){
-                            $item = Injector::inst()->create($class, $tc);
-                            $item = $this->createRelatedObject($item->ClassName, $tc, $context, $info);
-                            $hasManyList->add($item);
+                        if(!empty($toCreate)){
+                            foreach($toCreate as $tc){
+                                $item = Injector::inst()->create($class, $tc);
+                                $item = $this->createRelatedObject($item->ClassName, $tc, $context, $info);
+                                $hasManyList->add($item);
+                            }
                         }
                     }
                 }
@@ -385,11 +421,30 @@ class NestedCreateOrUpdateScaffolderExtension extends Extension
             foreach($manyManys as $relationship => $class){
                 if(isset($args['Input'][$relationship])){
                     $items = $args['Input'][$relationship];
+
+                    /* @var $manyManyList ManyManyList */
+                    $manyManyList = $obj->$relationship();
+                    $existingCount = $manyManyList->count();
+
+                    $existingIDs = [];
                     foreach($items as $extraFields){
                         $itemID = $extraFields['ID'];
                         unset($extraFields['ID']);
+                        $existingIDs[] = $itemID;
                         //TODO we should validate the itemID to ensure it exists
-                        $obj->$relationship()->add($itemID, $extraFields);
+                        $manyManyList->add($itemID, $extraFields);
+                    }
+
+                    $toDeleteList = clone $manyManyList;
+
+                    if(!empty($existingIDs) && $existingCount){
+                        $toDeleteList = $toDeleteList->exclude('ID', $existingIDs);
+                    }
+
+                    if($toDeleteList->count() && $existingCount){
+                        foreach($toDeleteList as $toDeleteItem){
+                            $manyManyList->removeByID($toDeleteItem->ID);
+                        }
                     }
                 }
             }
