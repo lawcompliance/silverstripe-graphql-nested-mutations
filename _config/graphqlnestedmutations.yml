@@ -1,6 +1,12 @@
 ---
 Name: graphqlnestedmutations
+Only:
+  moduleexists: silverstripe/graphql
 ---
-SilverStripe\GraphQL\Scaffolding\Scaffolders\MutationScaffolder:
-  extensions:
-    - Internetrix\GraphQLNestedMutations\Extensions\NestedCreateOrUpdateScaffolderExtension
+
+SilverStripe\Core\Injector\Injector:
+  SilverStripe\GraphQL\Schema\Registry\PluginRegistry:
+    constructor:
+      - 'Internetrix\GraphQLNestedMutations\Plugins\HasOneNestedMutationPlugin'
+      - 'Internetrix\GraphQLNestedMutations\Plugins\HasManyNestedMutationPlugin'
+      - 'Internetrix\GraphQLNestedMutations\Plugins\ManyManyNestedMutationPlugin'
