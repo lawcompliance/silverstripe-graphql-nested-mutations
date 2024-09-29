@@ -21,7 +21,7 @@
     "issues": "https://gitlab.internetrix.net/silverstripe-modules/graphql-nested-mutations/issues"
   },
   "require": {
-    "silverstripe/vendor-plugin": "^1.2",
+    "silverstripe/vendor-plugin": "^2",
     "silverstripe/framework": "^4",
     "silverstripe/graphql": "^4"
   },
